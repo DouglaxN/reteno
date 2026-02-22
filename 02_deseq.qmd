@@ -1,0 +1,122 @@
+---
+title: "02 - Process RNAseq Data"
+author: "Douglas Nunes"
+format: html
+editor: visual
+execute: 
+  cache: true
+---
+
+## Loading required tables
+
+```{r}
+load(file = "RDatas/GENE_COUNTS.RData")
+load(file = "RDatas/metadado_final.RData")
+```
+
+## Differential gene expression analysis based on the negative binomial distribution (DESeq2)
+
+```{r}
+# Juntando a tabela de contagem 24h e 72h 
+gene_counts_total <- bind_cols(gene_counts_total_24h,gene_counts_total_72h)
+
+# Reordenando as colunas para que fiquem na mesma ordem 
+metadado_final <- metadado_final[colnames(gene_counts_total), ]
+
+# Salvando metadado final 
+save(gene_counts_total, file = "RDatas/gene_counts_total.RData")
+```
+
+```{r}
+# Converte a coluna type para fator (necessário para DESeq2)
+metadado_final$type <- as.factor(metadado_final$type)
+metadado_final$hours <- as.factor(metadado_final$hours)
+
+# Garanta que 'Control' seja o nível de referência (baseline)
+metadado_final$type <- relevel(metadado_final$type, ref = "Control")
+
+# Cria objeto DESeq2 com dados brutos
+dds <- DESeqDataSetFromMatrix(
+  countData = as.matrix(gene_counts_total), # Matriz de contagens
+  colData   = metadado_final,               # Metadados
+  design    = ~ hours + type + brach                 # Variável de interesse
+)
+
+dds <- DESeq(dds)
+
+# Comparação do efeito do tratamento (independente das horas)
+res <- DESeq2::results(dds, contrast=c("type", "Reteno", "Control"))
+summary(res)
+
+# Normaliza dados usando VST (Variance Stabilizing Transformation)
+dds_vst <- vst(dds, blind = FALSE)
+
+# Extrai matriz de contagens normalizadas
+counts_genes_vst <- assay(dds_vst)
+
+# Subsetar o metadata para as amostras que realmente existem 
+metadado_final <- metadado_final[colnames(counts_genes_vst),]
+
+# Garante ordem entre metadado e matriz
+rownames(metadado_final) <- colnames(counts_genes_vst)
+counts_genes_vst <- counts_genes_vst[, rownames(metadado_final)]
+
+# Salva objetos para análises futuras
+save(metadado_final, counts_genes_vst, dds, dds_vst,
+     file = "RDatas/DDS_DGE.RData")
+```
+
+## Visualizations
+
+## PCA - principal component analysis
+
+```{r}
+# Realiza PCA
+pca_res <- pca(counts_genes_vst, metadata = metadado_final)
+
+pca_img <- biplot(
+  pca_res,
+  colby = "dosage",
+  legendPosition = "bottom",
+  title = "PCA – Gradiente de dosagem de Reteno vs Controle"
+)
+
+# Salva gráfico PCA
+png("imgs/PCA.png", width = 2500, height = 2000, res = 250)
+print(pca_img)
+dev.off()
+```
+
+```{r}
+eigencorplot(pca_res, metavars = c("hours", "dosage", "type", "brach"))
+```
+
+## Dendogram
+
+```{r}
+# Transpor matriz de counts transformados
+counts_genes_vst_t <- t(counts_genes_vst)
+
+# Setar nomes dos grupos
+rownames(counts_genes_vst_t) <- metadado_final$sample_id
+
+# Clusterização hierárquica
+d <- dist(as.matrix(counts_genes_vst_t), method = "euclidean")
+clusters <- hclust(d, method = "complete")
+
+# Plotar
+par(mar = c(1, 1, 1, 1))
+plot(clusters)
+
+# Salva dendrograma
+png("imgs/cluster.png", width = 3000, height = 2500, res = 300)
+plot(cluster, main = "Cluster Hierárquico - Amostras")
+dev.off()
+```
+
+```{r}
+# Salva gráfico Screeplot
+png("imgs/screeplot.png", width = 2500, height = 2000, res = 250)
+screeplot(pca_res, title = "Screeplot - OCCC vs Controle")
+dev.off()
+```

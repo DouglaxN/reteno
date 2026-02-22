@@ -1,0 +1,4 @@
+sample,fastq_1,fastq_2,strandedness
+NC72-1,RET72-hours/NC72-1_R1.fastq.gz,RET72-hours/NC72-1_R2.fastq.gz,auto
+NC72-2,RET72-hours/NC72-2_R1.fastq.gz,RET72-hours/NC72-2_R2.fastq.gz,auto
+NC72-3,RET72-hours/NC72-3_R1.fastq.gz,RET72-hours/NC72-3_R2.fastq.gz,auto

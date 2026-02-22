@@ -1,0 +1,13 @@
+.*
+ncbi*
+nf*
+!.gitignore
+
+RET24-hours/
+RET72-hours/
+
+imgs/
+RDatas/
+analise/
+annotation/
+work/

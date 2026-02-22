@@ -1,0 +1,277 @@
+---
+title: "01 - Process RNAseq Reteno Data"
+author: "Douglas Nunes"
+format: html
+editor: visual
+execute: 
+  cache: true
+---
+
+# Process RNASeq data
+
+## Import libraries
+
+```{r libs}
+library(tximport)       
+library(GenomicFeatures) 
+library(txdbmaker)       
+library(tidyverse)       
+library(readr)           
+library(AnnotationDbi)   
+library(S4Vectors)       
+library(PCAtools)        
+library(DESeq2)         
+library(DRIMSeq)         
+library(stageR)          
+library(UpSetR)         
+library(dplyr)
+library(rtracklayer)
+library(ggplot2)
+library(pheatmap)
+library(biomaRt)
+library(clusterProfiler)
+library(paletteer)
+library(readr)
+library(limma)
+```
+
+## Creation of the gene and transcript dictionary
+
+```{r}
+# Caminho do arquivo de anotação GTF comprimido
+gtf_path <- "annotation/gencode.v47.annotation.gtf.gz"
+
+# Caminho para o banco de dados SQLite que será criado a partir do GTF
+txdb_sqlite <- "annotation/gencode.v47.annotation.gtf.sqlite"
+
+# Se o banco SQLite ainda não existe, cria a partir do GTF
+if (!file.exists(txdb_sqlite)) {
+  # Cria o objeto TxDb a partir do GTF
+  txdb <- txdbmaker::makeTxDbFromGFF(gtf_path, format = "gtf")
+  
+  # Salva o banco de dados no formato SQLite
+  saveDb(txdb, txdb_sqlite)
+}
+
+# Carrega o banco de dados SQLite para uso
+txdb <- loadDb(txdb_sqlite)
+
+# Extrai relação entre genes (GENEID) e transcritos (TXNAME)
+tx_info <- AnnotationDbi::select(
+  txdb,                   # Banco de dados carregado
+  keys(txdb, "GENEID"),   # Lista de IDs de genes
+  "TXNAME",               # Coluna desejada: nome dos transcritos
+  "GENEID"                # Coluna-chave para mapeamento
+)
+
+# Conta o número de transcritos por gene e adiciona como coluna
+tx_info$ntx <- table(tx_info$GENEID)[match(tx_info$GENEID, names(table(tx_info$GENEID)))]
+
+# Cria dataframe no formato exigido pelo tximport: colunas "tx" e "gene"
+tx2gene <- data.frame(
+  tx = tx_info$TXNAME,    # Nome do transcrito
+  gene = tx_info$GENEID,  # ID do gene associado
+  stringsAsFactors = FALSE
+)
+
+# Salva o dicionário em formato RData para reutilização
+save(tx2gene, file = "annotation/dicionario_gene_tx.RData")
+```
+
+### If you already have this file, just upload it.
+
+```{r}
+load(file = "annotation/dicionario_gene_tx.RData")
+```
+
+# Creation of metadata
+
+### Creating metadata control for 24h and 72h sample
+
+```{r}
+# Lê metadados do grupo controle
+meta_24h_controle <- read_csv("metadado/meta_24h_controle.csv")
+meta_72h_controle <- read_csv("metadado/meta_72h_controle.csv")
+
+# Cria dataframe padronizado para o controle
+meta_24h_controle <- data.frame(
+  sample_id = paste0("NC24-", 1:3),
+  hours = paste0("24h"),
+  brach = paste0(1:3),
+  type = "Control",
+  dosage = "0"
+)
+
+meta_72h_controle <- data.frame(
+  sample_id = paste0("NC72-", 1:3),
+  hours = paste0("72h"),
+  brach = paste0(1:3),
+  type = "Control",
+  dosage = "0"
+)
+# Define sample_id como rownames (obrigatório para DESeq2)
+rownames(meta_24h_controle) <- meta_24h_controle$sample_id
+rownames(meta_72h_controle) <- meta_72h_controle$sample_id
+
+# Visualizar a tabela criada 
+meta_24h_controle
+meta_72h_controle
+```
+
+### Creating metadata retene for 24h and 72h sample
+
+```{r}
+# Lê metadados do grupo controle
+meta_24h_reteno <- read_csv("metadado/meta_24h_reteno.csv")
+meta_72h_reteno <- read_csv("metadado/meta_72h_reteno.csv")
+
+# Usando as linhas dos dados corretos
+meta_24h_reteno <- meta_24h_reteno[15:17, ]
+meta_72h_reteno <- meta_72h_reteno[10:12, ]
+
+# Cria dataframe padronizado para com reteno
+meta_24h_reteno <- data.frame(
+  sample_id = paste0("RET24-32-", 1:3),
+  hours = paste0("24h"),
+  brach = paste0(1:3),
+  type = "Reteno",
+  dosage = "32"
+)
+
+meta_72h_reteno <- data.frame(
+  sample_id = paste0("RET72-32-", 1:3),
+  hours = paste0("72h"),
+  brach = paste0(1:3),
+  type = "Reteno",
+  dosage = "32"
+)
+# Define sample_id como rownames (obrigatório para DESeq2)
+rownames(meta_24h_reteno) <- meta_24h_reteno$sample_id
+rownames(meta_72h_reteno) <- meta_72h_reteno$sample_id
+
+# Visualizar a tabela criada 
+meta_24h_reteno
+meta_72h_reteno
+```
+
+## Creating metadata total (reteno + control 24h)
+
+```{r}
+# Combina metadados controle + reteno
+metadado_final_24h <- rbind(meta_24h_controle, meta_24h_reteno)
+
+# Salvando metadado final 
+save(metadado_final_24h, file = "RDatas/metadado_final_24h.RData")
+```
+
+## Creating metadata total (reteno + control 72h)
+
+```{r}
+# Combina metadados controle + reteno
+metadado_final_72h <- rbind(meta_72h_controle, meta_72h_reteno)
+
+# Salvando metadado final 
+save(metadado_final_72h, file = "RDatas/metadado_final_72h.RData")
+```
+
+### Combine the 24-hour and 72-hour metadata
+
+```{r}
+# Combina metadados
+metadado_final <- rbind(metadado_final_24h, metadado_final_72h)
+
+# Salvando metadado final 
+save(metadado_final, file = "RDatas/metadado_final.RData")
+```
+
+# Count matrix - tximport
+
+### Count matrix - 24h
+
+```{r}
+# Lê contagens de genes para Reteno e Controle
+gene_counts_reteno_24h <- read.delim("analise/24h_reteno/tximport/gene_counts.tsv")
+gene_counts_ctrl_24h <- read.delim("analise/24h_controle/tximport/gene_counts.tsv")
+
+# Usando os dados das colunas indicadas
+gene_counts_reteno_24h <- gene_counts_reteno_24h %>% select(starts_with("RET24.32"))
+
+# Converte todos os valores para inteiros (necessário para DESeq2)
+gene_counts_reteno_24h[] <- lapply(gene_counts_reteno_24h, as.integer)
+gene_counts_ctrl_24h[] <- lapply(gene_counts_ctrl_24h, as.integer)
+
+# Ajusta nomes das colunas para bater com os metadados
+colnames(gene_counts_reteno_24h) <- gsub("_T1$", "", colnames(gene_counts_reteno_24h))
+colnames(gene_counts_ctrl_24h) <- gsub("_T1$", "", colnames(gene_counts_ctrl_24h))
+
+# Deixando o nome das colunas iguais ao do metadado trocando "/" por "."
+colnames(gene_counts_reteno_24h) <- gsub("\\.", "-", colnames(gene_counts_reteno_24h))
+colnames(gene_counts_ctrl_24h) <- gsub("\\.", "-", colnames(gene_counts_ctrl_24h))
+
+
+# Ajusta colunas de reteno para que coincidam com name
+colnames(gene_counts_reteno_24h)[match(meta_24h_reteno$name, colnames(gene_counts_reteno_24h))] <- meta_24h_reteno$name
+colnames(gene_counts_ctrl_24h)[match(meta_24h_controle$name, colnames(gene_counts_ctrl_24h))] <- meta_24h_controle$name
+
+
+# Adiciona coluna com ENSEMBL ID (necessário para merge)
+gene_counts_reteno_24h <- rownames_to_column(gene_counts_reteno_24h, var = "ENSEMBLID")
+gene_counts_ctrl_24h <- rownames_to_column(gene_counts_ctrl_24h, var = "ENSEMBLID")
+```
+
+### Count matrix - 72h
+
+```{r}
+# Lê contagens de genes para Reteno e Controle
+gene_counts_reteno_72h <- read.delim("analise/72h_reteno/tximport/gene_counts.tsv")
+gene_counts_ctrl_72h <- read.delim("analise/72h_controle/tximport/gene_counts.tsv")
+
+# Usando os dados das colunas indicadas
+gene_counts_reteno_72h <- gene_counts_reteno_72h %>% select(starts_with("RET72.32"))
+
+gene_counts_reteno_72h[] <- lapply(gene_counts_reteno_72h, as.integer)
+gene_counts_ctrl_72h[] <- lapply(gene_counts_ctrl_72h, as.integer)
+
+# Ajusta nomes das colunas para bater com os metadados
+colnames(gene_counts_reteno_72h) <- gsub("_T1$", "", colnames(gene_counts_reteno_72h))
+colnames(gene_counts_ctrl_72h) <- gsub("_T1$", "", colnames(gene_counts_ctrl_72h))
+
+# Deixando o nome das colunas iguais ao do metadado trocando "/" por "."
+colnames(gene_counts_reteno_72h) <- gsub("\\.", "-", colnames(gene_counts_reteno_72h))
+colnames(gene_counts_ctrl_72h) <- gsub("\\.", "-", colnames(gene_counts_ctrl_72h))
+
+# Ajusta colunas de reteno para que coincidam com name
+colnames(gene_counts_reteno_72h)[match(meta_72h_reteno$name, colnames(gene_counts_reteno_72h))] <- meta_72h_reteno$name
+colnames(gene_counts_ctrl_72h)[match(meta_72h_controle$name, colnames(gene_counts_ctrl_72h))] <- meta_72h_controle$name
+
+
+# Adiciona coluna com ENSEMBL ID (necessário para merge)
+gene_counts_reteno_72h <- rownames_to_column(gene_counts_reteno_72h, var = "ENSEMBLID")
+gene_counts_ctrl_72h <- rownames_to_column(gene_counts_ctrl_72h, var = "ENSEMBLID")
+```
+
+Combining gene count tables
+
+```{r}
+# Junta contagens de Controle + reteno
+gene_counts_total_24h <- merge(gene_counts_ctrl_24h, gene_counts_reteno_24h, by = "ENSEMBLID")
+gene_counts_total_72h <- merge(gene_counts_ctrl_72h, gene_counts_reteno_72h, by = "ENSEMBLID")
+
+# Remove genes duplicados
+gene_counts_total_24h <- gene_counts_total_24h[!duplicated(gene_counts_total_24h$ENSEMBLID), ]
+gene_counts_total_72h <- gene_counts_total_72h[!duplicated(gene_counts_total_72h$ENSEMBLID), ]
+
+# Define ENSEMBLID como rownames e remove coluna extra
+rownames(gene_counts_total_24h) <- gene_counts_total_24h$ENSEMBLID
+gene_counts_total_24h$ENSEMBLID <- NULL
+
+rownames(gene_counts_total_72h) <- gene_counts_total_72h$ENSEMBLID
+gene_counts_total_72h$ENSEMBLID <- NULL
+
+# Reordenando os metadados para bater com a ordem da matriz
+metadado_final <- metadado_final[colnames(gene_counts_total_24h), ]
+metadado_final <- metadado_final[colnames(gene_counts_total_72h), ]
+
+# Salva tabela final de contagens
+save(gene_counts_total_24h, gene_counts_total_72h, file = "RDatas/GENE_COUNTS.RData")
+```

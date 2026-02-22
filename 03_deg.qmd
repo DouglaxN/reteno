@@ -1,0 +1,610 @@
+---
+title: "02 - Process RNAseq Data"
+author: "Douglas Nunes"
+format: html
+editor: visual
+execute: 
+  cache: true
+---
+
+## Loading required tables
+
+```{r}
+load(file = "RDatas/gene_counts_total.RData")
+load(file = "RDatas/metadado_final.RData")
+```
+
+# Annotation data structure
+
+```{r}
+# Importando arquivo GFF/GTF 
+gff <- import.gff("annotation/gencode.v47.annotation.gtf.gz")
+
+# Converter GFF em dataframe extraindo apenas o elemento de metadados da anotação 
+gff<- as.data.frame(gff@elementMetadata) 
+
+# Mantém apenas colunas relevantes para identificação dos genes
+gff <- gff[,c("gene_id" ,"gene_type", "gene_name")]
+
+# Remover duplictas
+gff <- dplyr::distinct(gff)
+
+# Resumo por tipo de gene 
+table(gff$gene_type)
+
+# Salvando data
+save(gff, file = "RDatas/GFF.RData")
+```
+
+## Filter abundance (test)
+
+```{r}
+library(edgeR)
+
+# Mantém apenas colunas onde a soma de leituras é maior que zero
+counts_filtrada_biotipo <- counts_filtrada_biotipo[, colSums(counts_filtrada_biotipo) > 0]
+
+# Calculando abundacnia 
+cpm_matrix <- cpm(counts_filtrada_biotipo)
+
+keep <- rowSums(cpm_matrix >= 10) >= 3
+
+# Tabela final pronta para análise diferencial
+counts_final <- counts_filtrada_biotipo[keep, ]
+
+print(paste("Genes iniciais:", nrow(gene_counts_total)))
+print(paste("Genes após filtro de biótipo e 10 CPM:", nrow(counts_final)))
+```
+
+# Organizing metadata
+
+```{r}
+# Garantindo que o metadado tenha apenas as amostras que sobraram depois do CPM
+metadado_final <- metadado_final[colnames(gene_counts_total), ]
+
+# Verificnando se os nomes batem exatamente 
+print(ncol(gene_counts_total) == nrow(metadado_final))
+print(all(colnames(gene_counts_total) == rownames(metadado_final)))
+```
+
+# Total RNA
+
+## Differential gene expression analysis based on the negative binomial distribution (DESeq2)
+
+```{r}
+# Reordena metadado para coincidir com a ordem das colunas da matriz de contagens
+metadado_final <- metadado_final[colnames(gene_counts_total), ]
+
+# Removendo o h da coluna hours
+metadado_final$hours <- gsub("h", "", metadado_final$hours)
+
+# Converte a coluna type para fator (necessário para DESeq2)
+metadado_final$hours <- as.factor(metadado_final$hours)
+metadado_final$type <- as.factor(metadado_final$type)
+metadado_final$brach <- as.factor(metadado_final$brach)
+
+
+# Cria objeto DESeq2 com dados brutos
+dds <- DESeqDataSetFromMatrix(
+  countData = as.matrix(gene_counts_total), # Matriz de contagens
+  colData   = metadado_final,               # Metadados
+  design    = ~ hours + type + brach        # Variável de interesse
+)
+
+dds_dge <- DESeq(dds)
+
+resultsNames(dds_dge)
+
+res_time <- DESeq2::results(dds_dge, name = "hours_72_vs_24")
+
+# Comparação do efeito do tratamento (independente das horas)
+#res_type <- DESeq2::results(dds_dge, contrast=c("type", "Reteno", "Control"))
+#summary(res_type)
+
+#res_time <- DESeq2::results(dds_dge, contrast = c("hours", "72h", "24h"))
+#summary(res_time)
+
+# MA-plot
+plotMA(res_time)
+
+# Transformar em dataframe
+df_res_dge <- as.data.frame(res_time)
+
+# Remveno NAs
+df_res_dge <- na.omit(df_res_dge)
+
+# Salva objetos para análises futuras
+save(dds_dge, df_res_dge, file = "RDatas/RESULTS_DGE_TOTAL.RData")
+```
+
+# Volcano plot
+
+### Data construction for the volcano plot
+
+```{r}
+vulcano_DGE<- data.frame(res_time)
+
+# Vulcano plot para DGE padj <= 0.015####
+vulcano_DGE <- vulcano_DGE %>%
+  # Garantir que colunas essenciais existem e estão limpas
+  mutate(
+    padj = ifelse(is.na(padj), 1, padj),                   # substitui NA por 1
+    log2FoldChange = ifelse(is.na(log2FoldChange), 0, log2FoldChange),
+    
+    # Classificação dos genes
+    signif = case_when(
+      padj <= 0.05 & log2FoldChange > 1  ~ "Upregulated",
+      padj <= 0.05 & log2FoldChange < -1 ~ "Downregulated",
+      TRUE ~ "Not significant"
+    ),
+    
+    # Ordem lógica dos fatores
+    signif = factor(signif, levels = c("Downregulated", "Not significant", "Upregulated")),
+    
+    # Evitar Inf quando padj = 0
+    padj = ifelse(padj == 0, 1e-300, padj),
+    
+    # Eixo Y do volcano plot
+    log10padj = -log10(padj)
+  )
+
+# Calcular os valores a partir da tabela filtrada com padj <= 0.05
+DGE_down_total <- sum(vulcano_DGE$signif == "Downregulated")
+DGE_ns_total   <- sum(vulcano_DGE$signif == "Not significant")
+DGE_up_total   <- sum(vulcano_DGE$signif == "Upregulated")
+```
+
+### Generating plot
+
+```{r}
+# Salvando o vulcano plot 
+png("imgs/Vulcano_DGE_RNA_TOTAL.png", 
+    width = 2000, 
+    height = 2000, 
+    res = 250)
+
+# Criar Volcano plot usando ggplot2
+ggplot(vulcano_DGE, aes(x = log2FoldChange, y = log10padj, color = signif)) +
+  
+  # Adicionar pontos representando os genes
+  geom_point(alpha = 0.6, size = 1.4) +
+  
+  # Definir cores personalizadas para cada categoria de significância
+  scale_color_manual(values = c(
+    "Downregulated" = "#2166AC",
+    "Not significant" = "gray80",
+    "Upregulated" = "#B2182B"
+  )) +
+  
+  # Adicionar linhas de corte (thresholds)
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", linewidth = 0.3) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", linewidth = 0.3) +
+  
+  # Anotar no gráfico com base nessa contagem
+  annotate("text", x = -15, y = 75, label = paste("Down:", DGE_down_total), color = "#2166AC", hjust = 0) +
+  annotate("text", x = 0, y = 75, label = paste("NS:", DGE_ns_total), color = "gray40", hjust = 0.5) +
+  annotate("text", x = 15, y = 75, label = paste("Up:", DGE_up_total), color = "#B2182B", hjust = 1) +
+  
+  # Ajustar eixos com limites e espaçamento
+  scale_x_continuous(limits = c(-15, 15), expand = expansion(mult = 0.02)) +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = 0.02)) +
+  
+  # Títulos dos eixos e legenda
+  labs(
+    x = expression(log[2]~Fold~Change),
+    y = expression(-log[10]~"adjusted p-value"),
+    color = "Significance"
+  ) +
+  
+  # Estilização geral do gráfico
+  theme_minimal(base_size = 13, base_family = "Helvetica") +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "top",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    axis.title = element_text(size = 13),
+    axis.text = element_text(color = "black", size = 10),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 11)
+  ) +
+  ggtitle("Volcano Plot for the Differentially Expressed Genes (DGE)",         
+          subtitle = "RNAs with padj < 0.05")
+
+dev.off()
+
+save(vulcano_DGE, DGE_down_total, DGE_ns_total, DGE_up_total, file = "RDatas/VULCONO_DGE_TOTAL.RData")
+
+```
+
+# ncRNA
+
+## Filtering by RNA type
+
+```{r}
+# lncRNA 
+lncRNA_list <- gff[gff$gene_type == "lncRNA",]
+lncRNA_list$gene_id <- sub("\\.\\d+$", "", lncRNA_list$gene_id)
+
+# mRNA
+#mRNA_list <- gff[gff$gene_type == "protein_coding",]
+#mRNA_list$gene_id <- sub("\\.\\d+$", "", mRNA_list$gene_id)
+
+# miRNA
+miRNA_list <- gff[gff$gene_type == "miRNA",]
+miRNA_list$gene_id <- sub("\\.\\d+$", "", miRNA_list$gene_id)
+
+# Salvando os genes alvos
+genes_alvos <- c(lncRNA_list$gene_id, miRNA_list$gene_id)
+```
+
+## Preparing the gene counts table
+
+```{r}
+# Criando tabela filtrada 
+counts_filtrada_biotipo <- gene_counts_total
+
+# Garantindo que os IDs da tablea estejam limpos
+rownames(counts_filtrada_biotipo) <- sub("\\.\\d+$", "", rownames(counts_filtrada_biotipo))
+
+# Filtando a tabela para manter apenas os biotipos que estamos interessados
+genes_presentes <- intersect(rownames(counts_filtrada_biotipo), genes_alvos)
+counts_filtrada_biotipo <- counts_filtrada_biotipo[genes_presentes, ]
+```
+
+## Organizing metadata
+
+```{r}
+# Garantindo que o metadado tenha apenas as amostras 
+metadado_final <- metadado_final[colnames(counts_filtrada_biotipo), ]
+
+# Verificnando se os nomes batem exatamente 
+print(ncol(counts_filtrada_biotipo) == nrow(metadado_final))
+print(all(colnames(counts_filtrada_biotipo) == rownames(metadado_final)))
+```
+
+## DESEQ2
+
+```{r}
+# Removendo o h da coluna hours
+metadado_final$hours <- gsub("h", "", metadado_final$hours)
+
+# Converte a coluna type para fator (necessário para DESeq2)
+metadado_final$hours <- as.factor(metadado_final$hours)
+metadado_final$type <- as.factor(metadado_final$type)
+metadado_final$brach <- as.factor(metadado_final$brach)
+
+
+# Cria objeto DESeq2 com dados brutos
+dds_filtred <- DESeqDataSetFromMatrix(
+  countData = as.matrix(counts_filtrada_biotipo), # Matriz de contagens
+  colData   = metadado_final,               # Metadados
+  design    = ~ hours + type + brach        # Variável de interesse
+)
+
+dds_dge_filtred <- DESeq(dds_filtred)
+
+resultsNames(dds_dge_filtred)
+
+res_time_filtred <- DESeq2::results(dds_dge_filtred, name = "hours_72_vs_24")
+
+# Comparação do efeito do tratamento (independente das horas)
+#res_type <- DESeq2::results(dds_dge, contrast=c("type", "Reteno", "Control"))
+#summary(res_type)
+
+#res_time <- DESeq2::results(dds_dge, contrast = c("hours", "72h", "24h"))
+#summary(res_time)
+
+# MA-plot
+plotMA(res_time_filtred)
+
+# Transformar em dataframe
+df_res_dge_filtred <- as.data.frame(res_time_filtred)
+
+# Remveno NAs
+df_res_dge_filtred <- na.omit(df_res_dge_filtred)
+
+# Salva objetos para análises futuras
+save(dds_dge_filtred, df_res_dge_filtred, file = "RDatas/RESULTS_DGE_FILTRED.RData")
+```
+
+### Data construction for the volcano plot
+
+```{r}
+vulcano_DGE_filtred<- data.frame(df_res_dge_filtred)
+
+# Vulcano plot para DGE padj <= 0.015####
+vulcano_DGE_filtred <- vulcano_DGE_filtred %>%
+  # Garantir que colunas essenciais existem e estão limpas
+  mutate(
+    padj = ifelse(is.na(padj), 1, padj),                   # substitui NA por 1
+    log2FoldChange = ifelse(is.na(log2FoldChange), 0, log2FoldChange),
+    
+    # Classificação dos genes
+    signif = case_when(
+      padj <= 0.05 & log2FoldChange > 1  ~ "Upregulated",
+      padj <= 0.05 & log2FoldChange < -1 ~ "Downregulated",
+      TRUE ~ "Not significant"
+    ),
+    
+    # Ordem lógica dos fatores
+    signif = factor(signif, 
+                    levels = c("Downregulated", "Not significant", "Upregulated")),
+    
+    # Evitar Inf quando padj = 0
+    padj = ifelse(padj == 0, 1e-300, padj),
+    
+    # Eixo Y do volcano plot
+    log10padj = -log10(padj)
+  )
+
+# Calcular os valores a partir da tabela filtrada com padj <= 0.05
+DGE_down_filtred <- sum(vulcano_DGE_filtred$signif == "Downregulated")
+DGE_ns_filtred   <- sum(vulcano_DGE_filtred$signif == "Not significant")
+DGE_up_filtred   <- sum(vulcano_DGE_filtred$signif == "Upregulated")
+```
+
+### Generating plot
+
+```{r}
+# Salvando o vulcano plot 
+png("imgs/Vulcano_DGE_RNA_FILTRED.png", 
+    width = 2000, 
+    height = 2000, 
+    res = 250)
+
+# Criar Volcano plot usando ggplot2
+ggplot(vulcano_DGE_filtred, aes(x = log2FoldChange, y = log10padj, color = signif)) +
+  
+  # Adicionar pontos representando os genes
+  geom_point(alpha = 0.6, size = 1.4) +
+  
+  # Definir cores personalizadas para cada categoria de significância
+  scale_color_manual(values = c(
+    "Downregulated" = "#2166AC",
+    "Not significant" = "gray80",
+    "Upregulated" = "#B2182B"
+  )) +
+  
+  # Adicionar linhas de corte (thresholds)
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", linewidth = 0.3) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", linewidth = 0.3) +
+  
+  # Anotar no gráfico com base nessa contagem
+  annotate("text", x = -15, y = 75, label = paste("Down:", DGE_down_filtred), color = "#2166AC", hjust = 0) +
+  annotate("text", x = 0, y = 75, label = paste("NS:", DGE_ns_filtred), color = "gray40", hjust = 0.5) +
+  annotate("text", x = 15, y = 75, label = paste("Up:", DGE_up_filtred), color = "#B2182B", hjust = 1) +
+  
+  # Ajustar eixos com limites e espaçamento
+  scale_x_continuous(limits = c(-15, 15), expand = expansion(mult = 0.02)) +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = 0.02)) +
+  
+  # Títulos dos eixos e legenda
+  labs(
+    x = expression(log[2]~Fold~Change),
+    y = expression(-log[10]~"adjusted p-value"),
+    color = "Significance"
+  ) +
+  
+  # Estilização geral do gráfico
+  theme_minimal(base_size = 13, base_family = "Helvetica") +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "top",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    axis.title = element_text(size = 13),
+    axis.text = element_text(color = "black", size = 10),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 11)
+  ) +
+  ggtitle("Volcano Plot for the Differentially Expressed Genes (DGE)",         
+          subtitle = "ncRNAs with padj < 0.05")
+
+dev.off()
+
+save(vulcano_DGE_filtred, DGE_down_filtred, DGE_ns_filtred, DGE_up_filtred, file = "RDatas/VULCONO_DGE_FILTRED.RData")
+```
+
+# Filtred RNA vulcano plot
+
+```{r}
+# Extraindo as listas de IDs (garantindo que sejam vetores de texto)
+lncRNA_list_dge <- lncRNA_list$gene_id[lncRNA_list$gene_type == "lncRNA"]
+miRNA_list_dge  <- miRNA_list$gene_id[miRNA_list$gene_type == "miRNA"]
+
+# Pegar apenas as linhas de lncRNA
+DGE_lncRNA <- vulcano_DGE_filtred[rownames(vulcano_DGE_filtred) %in% lncRNA_list_dge, ]
+
+# Pegar apenas as linhas de miRNA
+DGE_miRNA  <- vulcano_DGE_filtred[rownames(vulcano_DGE_filtred) %in% miRNA_list_dge, ]
+
+```
+
+## lncRNA plot 
+
+```{r}
+# Vulcano plot para DGE padj <= 0.015####
+DGE_lncRNA <- DGE_lncRNA %>%
+  # Garantir que colunas essenciais existem e estão limpas
+  mutate(
+    padj = ifelse(is.na(padj), 1, padj),                   # substitui NA por 1
+    log2FoldChange = ifelse(is.na(log2FoldChange), 0, log2FoldChange),
+    
+    # Classificação dos genes
+    signif = case_when(
+      padj <= 0.05 & log2FoldChange > 1  ~ "Upregulated",
+      padj <= 0.05 & log2FoldChange < -1 ~ "Downregulated",
+      TRUE ~ "Not significant"
+    ),
+    
+    # Ordem lógica dos fatores
+    signif = factor(signif, 
+                    levels = c("Downregulated", "Not significant", "Upregulated")),
+    
+    # Evitar Inf quando padj = 0
+    padj = ifelse(padj == 0, 1e-300, padj),
+    
+    # Eixo Y do volcano plot
+    log10padj = -log10(padj)
+  )
+
+# Calcular os valores a partir da tabela filtrada com padj <= 0.05
+DGE_lncRNA_down <- sum(DGE_lncRNA$signif == "Downregulated")
+DGE_lncRNA_ns   <- sum(DGE_lncRNA$signif == "Not significant")
+DGE_lncRNA_up   <- sum(DGE_lncRNA$signif == "Upregulated")
+```
+
+```{r}
+# Salvando o vulcano plot 
+png("imgs/Vulcano_DGE_RNA_LNCRNA.png", 
+    width = 2000, 
+    height = 2000, 
+    res = 250)
+
+# Criar Volcano plot usando ggplot2
+ggplot(DGE_lncRNA, aes(x = log2FoldChange, y = log10padj, color = signif)) +
+  
+  # Adicionar pontos representando os genes
+  geom_point(alpha = 0.6, size = 1.4) +
+  
+  # Definir cores personalizadas para cada categoria de significância
+  scale_color_manual(values = c(
+    "Downregulated" = "#2166AC",
+    "Not significant" = "gray80",
+    "Upregulated" = "#B2182B"
+  )) +
+  
+  # Adicionar linhas de corte (thresholds)
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", linewidth = 0.3) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", linewidth = 0.3) +
+  
+  # Anotar no gráfico com base nessa contagem
+  annotate("text", x = -15, y = 75, label = paste("Down:", DGE_lncRNA_down), color = "#2166AC", hjust = 0) +
+  annotate("text", x = 0, y = 75, label = paste("NS:", DGE_lncRNA_ns), color = "gray40", hjust = 0.5) +
+  annotate("text", x = 15, y = 75, label = paste("Up:", DGE_lncRNA_up), color = "#B2182B", hjust = 1) +
+  
+  # Ajustar eixos com limites e espaçamento
+  scale_x_continuous(limits = c(-15, 15), expand = expansion(mult = 0.02)) +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = 0.02)) +
+  
+  # Títulos dos eixos e legenda
+  labs(
+    x = expression(log[2]~Fold~Change),
+    y = expression(-log[10]~"adjusted p-value"),
+    color = "Significance"
+  ) +
+  
+  # Estilização geral do gráfico
+  theme_minimal(base_size = 13, base_family = "Helvetica") +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "top",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    axis.title = element_text(size = 13),
+    axis.text = element_text(color = "black", size = 10),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 11)
+  ) +
+  ggtitle("Volcano Plot for the Differentially Expressed Genes (DGE)",         
+          subtitle = "lncRNAs with padj < 0.05")
+
+dev.off()
+
+save(vulcano_DGE_filtred, DGE_down_filtred, DGE_ns_filtred, DGE_up_filtred, file = "RDatas/VULCONO_DGE_LNCRNA.RData")
+```
+
+## miRNA
+
+```{r}
+# Vulcano plot para DGE padj <= 0.015####
+DGE_miRNA <- DGE_miRNA %>%
+  # Garantir que colunas essenciais existem e estão limpas
+  mutate(
+    padj = ifelse(is.na(padj), 1, padj),                   # substitui NA por 1
+    log2FoldChange = ifelse(is.na(log2FoldChange), 0, log2FoldChange),
+    
+    # Classificação dos genes
+    signif = case_when(
+      padj <= 0.05 & log2FoldChange > 1  ~ "Upregulated",
+      padj <= 0.05 & log2FoldChange < -1 ~ "Downregulated",
+      TRUE ~ "Not significant"
+    ),
+    
+    # Ordem lógica dos fatores
+    signif = factor(signif, 
+                    levels = c("Downregulated", "Not significant", "Upregulated")),
+    
+    # Evitar Inf quando padj = 0
+    padj = ifelse(padj == 0, 1e-300, padj),
+    
+    # Eixo Y do volcano plot
+    log10padj = -log10(padj)
+  )
+
+# Calcular os valores a partir da tabela filtrada com padj <= 0.05
+DGE_miRNA_down <- sum(DGE_miRNA$signif == "Downregulated")
+DGE_miRNA_ns   <- sum(DGE_miRNA$signif == "Not significant")
+DGE_miRNA_up   <- sum(DGE_miRNA$signif == "Upregulated")
+```
+
+```{r}
+# Salvando o vulcano plot 
+png("imgs/Vulcano_DGE_RNA_MICRNA.png", 
+    width = 2000, 
+    height = 2000, 
+    res = 250)
+
+# Criar Volcano plot usando ggplot2
+ggplot(DGE_miRNA, aes(x = log2FoldChange, y = log10padj, color = signif)) +
+  
+  # Adicionar pontos representando os genes
+  geom_point(alpha = 0.6, size = 1.4) +
+  
+  # Definir cores personalizadas para cada categoria de significância
+  scale_color_manual(values = c(
+    "Downregulated" = "#2166AC",
+    "Not significant" = "gray80",
+    "Upregulated" = "#B2182B"
+  )) +
+  
+  # Adicionar linhas de corte (thresholds)
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", linewidth = 0.3) +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", linewidth = 0.3) +
+  
+  # Anotar no gráfico com base nessa contagem
+  annotate("text", x = -15, y = 75, label = paste("Down:", DGE_miRNA_down), color = "#2166AC", hjust = 0) +
+  annotate("text", x = 0, y = 75, label = paste("NS:", DGE_miRNA_ns), color = "gray40", hjust = 0.5) +
+  annotate("text", x = 15, y = 75, label = paste("Up:", DGE_miRNA_up), color = "#B2182B", hjust = 1) +
+  
+  # Ajustar eixos com limites e espaçamento
+  scale_x_continuous(limits = c(-15, 15), expand = expansion(mult = 0.02)) +
+  scale_y_continuous(limits = c(0, 100), expand = expansion(mult = 0.02)) +
+  
+  # Títulos dos eixos e legenda
+  labs(
+    x = expression(log[2]~Fold~Change),
+    y = expression(-log[10]~"adjusted p-value"),
+    color = "Significance"
+  ) +
+  
+  # Estilização geral do gráfico
+  theme_minimal(base_size = 13, base_family = "Helvetica") +
+  theme(
+    panel.grid = element_blank(),
+    legend.position = "top",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    axis.title = element_text(size = 13),
+    axis.text = element_text(color = "black", size = 10),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    plot.subtitle = element_text(hjust = 0.5, size = 11)
+  ) +
+  ggtitle("Volcano Plot for the Differentially Expressed Genes (DGE)",         
+          subtitle = "miRNAs with padj < 0.05")
+
+dev.off()
+
+save(DGE_miRNA, DGE_miRNA_down, DGE_miRNA_ns, DGE_miRNA_up, file = "RDatas/VULCONO_DGE_MICRNA.RData")
+```
