@@ -1,5 +1,5 @@
 ---
-title: "03 - Process RNAseq Data"
+title: "04 - Process RNAseq Data"
 author: "Douglas Nunes"
 format: html
 editor: visual
@@ -10,111 +10,127 @@ execute:
 ## Loading required tables
 
 ```{r}
-load(file = "RDatas/gene_counts_total.RData")
+load(file = "RDatas/VULCONO_DGE_MICRNA.RData")
+load(file = "RDatas/VULCONO_DGE_LNCRNA.RData")
+
+load(file = "RDatas/DDS_DGE_ncRNAs.RData")
 load(file = "RDatas/metadado_final.RData")
 ```
 
-# Annotation data structure
+# HEATMAP - lncRNA
 
 ```{r}
-# Importando arquivo GFF/GTF 
-gff <- import.gff("annotation/gencode.v47.annotation.gtf.gz")
+# Filtrar os genes diferencialmente expressos (padj <= 0.05) 
+filtro_DGE_lnc <- subset(DGE_lncRNA, padj <= 0.05)
 
-# Converter GFF em dataframe extraindo apenas o elemento de metadados da anotação 
-gff<- as.data.frame(gff@elementMetadata) 
+# Removendo colunas para que o Objeto DDS fique como original 
+filtro_DGE_lnc <- filtro_DGE_lnc[, 1:6]
 
-# Mantém apenas colunas relevantes para identificação dos genes
-gff <- gff[,c("gene_id" ,"gene_type", "gene_name")]
+# Seleciona os genes DGE 
+heatmap_DGE_lnc <- rownames(filtro_DGE_lnc)
 
-# Remover duplictas
-gff <- dplyr::distinct(gff)
+# Obter matriz de expressão normalizada, extração diretamente do objeto DESeq2
+exp_genes_DGE_lnc <- dds_dge_filtred[rownames(DGE_lncRNA), ]
 
-# Resumo por tipo de gene 
-table(gff$gene_type)
+# Selecionar apenas genes significativos na matriz de expressão
+idx_DGE_lnc <- rownames(exp_genes_DGE_lnc) %in% heatmap_DGE_lnc
 
-# Salvando data
-save(gff, file = "RDatas/GFF.RData")
+# Criar uma nova matriz só com os genes DEGs selecionados com padj <= 0.05
+exp_DGE_filtro_lnc <- assay(exp_genes_DGE_lnc[idx_DGE_lnc, ])
+
+
+# Transformar valores de expressão em z-score para padj <= 0.01
+exp_z_score_DGE_lnc <- t(apply(exp_DGE_filtro_lnc, 1, scale, center = T, scale = T))
+
+colnames(exp_z_score_DGE_lnc) <- colnames(exp_DGE_filtro_lnc)
 ```
 
-## Filter abundance (test)
+## plot heatmap
 
 ```{r}
-library(edgeR)
+# Anotação
+coluna_anotacao <- data.frame(Grupo = metadado_final$type)
+rownames(coluna_anotacao) <- rownames(metadado_final)
 
-# Mantém apenas colunas onde a soma de leituras é maior que zero
-counts_filtrada_biotipo <- counts_filtrada_biotipo[, colSums(counts_filtrada_biotipo) > 0]
+# Cores
+cores_heatmap <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
 
-# Calculando abundacnia 
-cpm_matrix <- cpm(counts_filtrada_biotipo)
+# Salvar
+png("imgs/heatmap_DGE_RNA_lnc.png", width = 2500, height = 2000, res = 250)
 
-keep <- rowSums(cpm_matrix >= 10) >= 3
-
-# Tabela final pronta para análise diferencial
-counts_final <- counts_filtrada_biotipo[keep, ]
-
-print(paste("Genes iniciais:", nrow(gene_counts_total)))
-print(paste("Genes após filtro de biótipo e 10 CPM:", nrow(counts_final)))
-```
-
-# Organizing metadata
-
-```{r}
-# Garantindo que o metadado tenha apenas as amostras que sobraram depois do CPM
-metadado_final <- metadado_final[colnames(gene_counts_total), ]
-
-# Verificnando se os nomes batem exatamente 
-print(ncol(gene_counts_total) == nrow(metadado_final))
-print(all(colnames(gene_counts_total) == rownames(metadado_final)))
-```
-
-# Total RNA
-
-## Differential gene expression analysis based on the negative binomial distribution (DESeq2)
-
-```{r}
-# Reordena metadado para coincidir com a ordem das colunas da matriz de contagens
-metadado_final <- metadado_final[colnames(gene_counts_total), ]
-
-# Removendo o h da coluna hours
-metadado_final$hours <- gsub("h", "", metadado_final$hours)
-
-# Converte a coluna type para fator (necessário para DESeq2)
-metadado_final$hours <- as.factor(metadado_final$hours)
-metadado_final$type <- as.factor(metadado_final$type)
-metadado_final$brach <- as.factor(metadado_final$brach)
-
-
-# Cria objeto DESeq2 com dados brutos
-dds <- DESeqDataSetFromMatrix(
-  countData = as.matrix(gene_counts_total), # Matriz de contagens
-  colData   = metadado_final,               # Metadados
-  design    = ~ hours + type + brach        # Variável de interesse
+# ✅ Plotando Heatmap ####
+pheatmap(
+  exp_z_score_DGE_lnc,
+  annotation_col = coluna_anotacao,
+  show_rownames = FALSE,
+  cluster_cols = TRUE,
+  cluster_rows = TRUE,
+  color = cores_heatmap,
+  fontsize = 10,
+  border_color = NA,
+  main = "Heatmap dos DGE - Reteno vs Controle \npadjust < 0.05",
+  annotation_colors = list(Grupo = c(Control = "skyblue", Reteno = "tomato"))
 )
 
-dds_dge <- DESeq(dds)
+dev.off()
+```
 
-resultsNames(dds_dge)
+# HEATMAP - miRNA
 
-res_time <- DESeq2::results(dds_dge, name = "hours_72_vs_24")
+```{r}
+# Filtrar os genes diferencialmente expressos (padj <= 0.05) 
+filtro_DGE_mi <- DGE_miRNA
 
-# Comparação do efeito do tratamento (independente das horas)
-#res_type <- DESeq2::results(dds_dge, contrast=c("type", "Reteno", "Control"))
-#summary(res_type)
+# Removendo colunas para que o Objeto DDS fique como original 
+filtro_DGE_mi <- filtro_DGE_mi[, 1:6]
 
-#res_time <- DESeq2::results(dds_dge, contrast = c("hours", "72h", "24h"))
-#summary(res_time)
+# Seleciona os genes DGE 
+heatmap_DGE_mi <- rownames(filtro_DGE_mi)
 
-# MA-plot
-plotMA(res_time)
+# Obter matriz de expressão normalizada, extração diretamente do objeto DESeq2
+exp_genes_DGE_mi <- dds_dge_filtred[rownames(DGE_miRNA), ]
 
-# Transformar em dataframe
-df_res_dge <- as.data.frame(res_time)
+# Selecionar apenas genes significativos na matriz de expressão
+idx_DGE_mi <- rownames(exp_genes_DGE_mi) %in% heatmap_DGE_mi
 
-# Remveno NAs
-df_res_dge <- na.omit(df_res_dge)
+# Criar uma nova matriz só com os genes DEGs selecionados com padj <= 0.05
+exp_DGE_filtro_mi <- assay(exp_genes_DGE_mi[idx_DGE_mi, ])
 
-# Salva objetos para análises futuras
-save(dds_dge, df_res_dge, file = "RDatas/RESULTS_DGE_TOTAL.RData")
+
+# Transformar valores de expressão em z-score para padj <= 0.01
+exp_z_score_DGE_mi <- t(apply(exp_DGE_filtro_mi, 1, scale, center = T, scale = T))
+
+colnames(exp_z_score_DGE_mi) <- colnames(exp_DGE_filtro_mi)
+```
+
+## plot heatmap
+
+```{r}
+# Anotação
+coluna_anotacao <- data.frame(Grupo = metadado_final$type)
+rownames(coluna_anotacao) <- rownames(metadado_final)
+
+# Cores
+cores_heatmap <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+
+# Salvar
+png("imgs/heatmap_DGE_RNA_mi.png", width = 2500, height = 2000, res = 250)
+
+# ✅ Plotando Heatmap ####
+pheatmap(
+  exp_z_score_DGE_mi,
+  annotation_col = coluna_anotacao,
+  show_rownames = FALSE,
+  cluster_cols = TRUE,
+  cluster_rows = TRUE,
+  color = cores_heatmap,
+  fontsize = 10,
+  border_color = NA,
+  main = "Heatmap dos DGE - Reteno vs Controle \npadjust < 0.05",
+  annotation_colors = list(Grupo = c(Control = "skyblue", Reteno = "tomato"))
+)
+
+dev.off()
 ```
 
 # Volcano plot
@@ -419,8 +435,6 @@ DGE_lncRNA <- vulcano_DGE_filtred[rownames(vulcano_DGE_filtred) %in% lncRNA_list
 # Pegar apenas as linhas de miRNA
 DGE_miRNA  <- vulcano_DGE_filtred[rownames(vulcano_DGE_filtred) %in% miRNA_list_dge, ]
 
-
-save(DGE_lncRNA, DGE_miRNA, file = "RDatas/DDS_DGE_ncRNAs.RData")
 ```
 
 ## lncRNA plot
